@@ -1,0 +1,90 @@
+// server.js
+import express from 'express';
+import cors from 'cors';
+import xml2js from 'xml2js';
+import fs from 'fs';
+import path from 'path';
+import { point } from '@turf/turf';
+import { booleanPointInPolygon } from '@turf/turf';
+
+const app = express();
+const port = 5000;
+const kmlFilePath = path.resolve('./data/asset.kml');
+
+app.use(cors());
+app.use(express.json());
+
+let polygons = [];
+
+// Function to load and parse KML file
+const loadKMLData = () => {
+    return new Promise((resolve, reject) => {
+        fs.readFile(kmlFilePath, (err, data) => {
+            if (err) {
+                return reject(err);
+            }
+            xml2js.parseString(data, (err, result) => {
+                if (err) {
+                    return reject(err);
+                }
+                try {
+                    const placemarks = result.kml.Document[0].Placemark;
+                    placemarks.forEach(place => {
+                        const coordinates = place.Polygon[0].outerBoundaryIs[0].LinearRing[0].coordinates[0].split(' ').map(coord => {
+                            const [lng, lat] = coord.split(',').map(Number);
+                            return [lng, lat];
+                        });
+                        polygons.push({
+                            id: place.name[0],
+                            polygon: turf.polygon([coordinates])
+                        });
+                    });
+                    resolve();
+                } catch (parseError) {
+                    reject(parseError);
+                }
+            });
+        });
+    });
+};
+
+// API to get the outlet based on location
+app.post('/api/get-outlet', async (req, res) => {
+    const { address } = req.body;
+    if (!address) {
+        return res.status(400).json({ error: 'Address is required' });
+    }
+
+    try {
+        const response = await axios.get(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}`);
+        if (response.data.length === 0) {
+            return res.status(404).json({ message: 'Address not found' });
+        }
+
+        const { lat, lon } = response.data[0];
+        const customerPoint = point([parseFloat(lon), parseFloat(lat)]);
+
+        let foundOutlet = 'not found';
+        for (const { id, polygon } of polygons) {
+            if (booleanPointInPolygon(customerPoint, polygon)) {
+                foundOutlet = id;
+                break;
+            }
+        }
+
+        res.json({ outlet: foundOutlet });
+    } catch (error) {
+        res.status(500).json({ error: 'Error processing request' });
+    }
+});
+
+// Start server after KML data is loaded
+loadKMLData()
+    .then(() => {
+        app.listen(port, () => {
+            console.log(`Server running on http://localhost:${port}`);
+        });
+    })
+    .catch(err => {
+        console.error('Failed to load KML data:', err);
+    });
